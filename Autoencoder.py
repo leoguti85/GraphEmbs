@@ -16,10 +16,17 @@ class Autoencoder:
 		self.batch_size =  128
 		self.h1_dim     =  800
 		self.lr         =  0.001
-		self.noise      =  0.1
+		self.noise      =  0.05
 		self.X          =  self.triangular_adjacency_matrix(nets,3)
 		self.embs       =  0
+		self.sim_mat    =  0
 
+
+	def similarity_matrix(self):
+		dist =  metrics.pairwise.euclidean_distances(self.embs)
+		dist_sc = (dist - dist.min())/(dist.max()-dist.min()) 
+		emb_sim = 1 - dist_sc						
+		return emb_sim		
 
 
 	def triangular_adjacency_matrix(self, nets, power=1):
@@ -96,13 +103,6 @@ class Autoencoder:
 		################ Getting activations ##############################
 
 		layer = 'h1_layer'
-		self.embs = self.get_activations(autoencoder, layer, x_train)[0]
-		embs_noise = self.get_activations(autoencoder, layer, x_train_noisy)[0]
-		#embs = embs.astype('float16')
-
+		self.embs     =  self.get_activations(autoencoder, layer, x_train)[0]
+		self.sim_mat  =  self.similarity_matrix()
 		
-		# Euclidean similarity	
-		dist =  metrics.pairwise.euclidean_distances(self.embs)
-		dist_sc = (dist - dist.min())/(dist.max()-dist.min()) # scaling dist matrix
-		emb_sim = 1 - dist_sc								# euclidean similarity	
-

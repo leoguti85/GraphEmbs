@@ -7,12 +7,29 @@ def parse_args():
 	parser.add_argument('-f', dest='f', help='Name of network')	
 	return parser.parse_args()
 
+# run run.py -f ER  
 
 args  =  parse_args()
 name  =  args.f
 
-data  =  Nets(name)
-#X_hds
+
+#data  =  Nets(name)
+#data.autoencoder.train()    
+#data.visualize_mssne()
+#data.visualize_tsne()
 
 
-#X_lds = mssne_implem(X_hds=X_hds, init=init, n_components=2, dm_hds=None); print("Without similarity matrix");
+'''
+Clustering
+'''
+
+nmi_list = []
+for i in range(0,10):
+
+	data  =  Nets(name,i)
+	data.autoencoder.train()   
+	nmi_list.append(data.clustering())
+
+
+print(str(np.mean(nmi_list))+" +/- "+str(np.std(nmi_list))) 
+

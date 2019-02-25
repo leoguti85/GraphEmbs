@@ -5,13 +5,19 @@ import copy
 import random
 import pandas as pd
 from Autoencoder import *
+from multi_scale import mssne_implem
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE, MDS
+from sklearn.cluster import SpectralClustering
+
 
 class Nets:
 
 
-	def __init__(self, name):
-		self.seed = 0
+	def __init__(self, name, seed=0):
+		self.seed = seed
 		self.nets = self.choose_net(name)
+		self.labels = self.get_nets_labels(self.nets,'type')
 		self.autoencoder = Autoencoder(self.nets)
 	
 	
@@ -19,7 +25,10 @@ class Nets:
 		self.seed = val	
 
 	def get_seed(self):
-		return self.seed	
+		return self.seed
+
+	def get_labels(self):
+		return self.labels		
 
 
 	def choose_net(self, name_net):
@@ -211,4 +220,77 @@ class Nets:
 		net  = nx.relabel_nodes(net,nt)
 		
 		return net	
+
+	def get_nets_labels(self, nets, name):
+		
+		return [nets[i][name] for i in range(0,len(nets))]
+
+
+
+	def plot_embs(self, X_lds, labels, tit, labs=0, classes_names=0):
+    
+	    N= len(set(labels))			
+	    cmap = plt.cm.jet
+	    # extract all colors from the .jet map
+	    cmaplist = [cmap(i) for i in range(cmap.N)]
+	    # create the new map
+	    cmap = cmap.from_list('Custom cmap', cmaplist, cmap.N)
+	    bounds = np.linspace(0,N,N+1)
+	    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+			
+	    a1 = plt.scatter(X_lds[:, 0], X_lds[:, 1],  c=labels, cmap=cmap, s=20, norm=norm)
+	    
+	    if labs==1:    
+	       for i in range(X_lds.shape[0]):              
+	           plt.text(X_lds[i, 0], X_lds[i, 1], str(i), fontdict={'size': 7})
+
+	    plt.xlim([2*X_lds.min(),2*X_lds.max()])
+	    plt.ylim([2*X_lds.min(),2*X_lds.max()])
+	    plt.title(tit)
+
+	    lp = lambda i: plt.plot([],color=a1.cmap(a1.norm(i)), ms=10.0, mec="none", ls="", marker="o")[0]                
+	    handles = [lp(i) for i in list(set(labels))]
+	    plt.legend(labels=classes_names, loc=2)
+
+	    plt.show()	
+
+	
+	def visualize_mssne(self):
+
+		init = 'random'
+		print("Applying Ms SNE")
+
+		X_lds =	mssne_implem(X_hds=self.autoencoder.embs, init=init, n_components=2, dm_hds=None); print("Without similarity matrix");	
+
+		self.plot_embs(X_lds, self.labels,'Embeddings', classes_names=list(set(self.labels)))
+
+
+	def visualize_tsne(self):
+
+
+		print("Applying tSNE")
+
+		X_lds = TSNE(n_components=2).fit_transform(self.autoencoder.embs)
+
+		self.plot_embs(X_lds, self.labels,'Embeddings', classes_names=list(set(self.labels)))	
+
+
+	
+	def clustering(self):
+	
+		n_clus = len(set(self.labels))
+
+		print("\n")
+		print("Clustering graph embeddings...")
+		sclus = SpectralClustering(n_clusters=n_clus, affinity='precomputed', random_state=123)
+		sclus.fit(self.autoencoder.sim_mat)
+		
+		nmi = metrics.normalized_mutual_info_score(self.labels, sclus.labels_)
+
+		return nmi
+
+		
+
+
+
 	
