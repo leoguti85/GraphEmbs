@@ -11,8 +11,19 @@ This code was tested on Debian GNU/Linux 8.11 (jessie), python 3.5.2
 ## Usage
 
 ### Example
-This script will learn graph embeddings for Erdős–Rényi networks generated with different average degree. Visualizatiton is done with Multi-scale SNE tool [1]:
+This script will learn graph embeddings for Erdős–Rényi networks generated from different parameters.
+Visualizatiton is done with Multi-scale SNE tool [1]:
 
 ```
-python run_synthetic_graphs.py -f ER
+python run_synthetic_graphs.py -f ER -opc 0
 ```
+
+Clustering graph embeddings for Erdős–Rényi networks, evaluationg its performance with the normalized mutual information metric:
+
+```
+python run_synthetic_graphs.py -f ER -opc 1
+```
+
+
+
+
