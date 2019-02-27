@@ -9,9 +9,9 @@ synthetic and real life datasets and evaluated in three different tasks: graph c
 This code was tested on Debian GNU/Linux 8.11 (jessie), python 3.5.2
 
 ## Usage
-
+The script run_synthetic_graphs.py will allow to reproduce the visualization and clustering results reported in the above paper.
 ### Example
-This script will learn graph embeddings for Erdős–Rényi networks generated from different parameters.
+Learning graph embeddings for Erdős–Rényi networks generated from different parameters.
 Visualizatiton is done with Multi-scale SNE tool [1]:
 
 ```
@@ -24,6 +24,6 @@ Clustering graph embeddings for Erdős–Rényi networks, evaluationg its perfor
 python run_synthetic_graphs.py -f ER -opc 1
 ```
 
-
+In construction...
 
 
