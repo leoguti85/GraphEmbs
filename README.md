@@ -26,10 +26,20 @@ Clustering graph embeddings for Erdős–Rényi networks in the **embedding spac
 ```
 python run_synthetic_graphs.py -f ER -opc 1
 ```
+Result:
 ```
 Clustering graph embeddings...
 1.0 +/- 0.0
 ```
+## Real life datasets
++ **Primary school temporal network data:**
+This data set contains the temporal network of contacts between the children and teachers used in the study published in BMC Infectious Diseases 2014, 14:695. [data](http://www.sociopatterns.org/datasets/primary-school-temporal-network-data/)
++ **Air Transportation Multiplex:** 
+This is a multiplex network composed by many airlines operating in Europe. The dataset contains up to thirty-seven different layers each one corresponding to a different airline. [data](http://complex.unizar.es/~atnmultiplex/)
 
+## References
+
+[1] John A. Lee, Diego H. Peluffo-Ordóñez, Michel Verleysen, Multi-scale similarities in stochastic neighbour embedding: Reducing dimensionality while preserving both local and global structure,Neurocomputing, Volume 169, 2015,
+Pages 246-261.
 
 
