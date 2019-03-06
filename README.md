@@ -17,8 +17,7 @@ Visualizatiton is done with Multi-scale SNE tool [1]:
 ```
 python run_synthetic_graphs.py -f ER -opc 0
 ```
-![alt text](https://github.com/leoguti85/GraphEmbs/blob/master/images/ER.png "ER networks embeddings" | width=100)
-
+![test](https://github.com/leoguti85/GraphEmbs/blob/master/images/ER.png | width=48)
 
 Clustering graph embeddings for Erdős–Rényi networks, evaluationg its performance with the normalized mutual information metric:
 
