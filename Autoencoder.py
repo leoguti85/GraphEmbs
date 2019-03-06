@@ -105,4 +105,5 @@ class Autoencoder:
 		layer = 'h1_layer'
 		self.embs     =  self.get_activations(autoencoder, layer, x_train)[0]
 		self.sim_mat  =  self.similarity_matrix()
+		print("\n")
 		

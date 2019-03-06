@@ -258,9 +258,9 @@ class Nets:
 	def visualize_mssne(self):
 
 		init = 'random'
-		print("Applying Ms SNE")
+		print("Applying Multi-scale SNE")
 
-		X_lds =	mssne_implem(X_hds=self.autoencoder.embs, init=init, n_components=2, dm_hds=None); print("Without similarity matrix");	
+		X_lds =	mssne_implem(X_hds=self.autoencoder.embs, init=init, n_components=2, dm_hds=None); 
 
 		self.plot_embs(X_lds, self.labels,'Embeddings', classes_names=list(set(self.labels)))
 
@@ -268,7 +268,7 @@ class Nets:
 	def visualize_tsne(self):
 
 
-		print("Applying tSNE")
+		print("Applying t-SNE")
 
 		X_lds = TSNE(n_components=2).fit_transform(self.autoencoder.embs)
 

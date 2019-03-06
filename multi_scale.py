@@ -50,7 +50,10 @@
 ########################################################################################################
 
 import numpy as np, copy, sklearn.decomposition, scipy.special, numba, scipy.optimize, scipy.spatial.distance, sklearn.datasets, matplotlib.pyplot as plt
-
+from sklearn.manifold import TSNE, MDS
+import matplotlib as mpl
+import argparse
+import pandas as pd
 
 ##############################
 ############################## Global variables
@@ -678,6 +681,257 @@ def sne_implem(X_hds, perp, init):
     # Returning
     return best_X_lds
 
+##############################
+############################## NeRV, from [6]. 
+##############################
+
+def nerv_obj_fct(x, p_ij, log_p_ij, w_cf, N, n_components, arr_den_s_i):
+    """
+    Computes the value of the objective function of NeRV.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain p_{j|i}, as defined in [6]. Diagonal elements must be equal to 0.
+    - log_p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain log(p_{j|i}), as defined in [6]. Diagonal elements must be equal to 0.
+    - w_cf: scalar between 0 and 1, equal to (1-lambda) in [6].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - arr_den_s_i: one-dimensional numpy array with N elements, in which element i contains sigma_i**2.
+    Out:
+    A scalar representing the NeRV objective function evaluation.
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the LDS similarities
+    q_ij, log_q_ij = sne_lds_similarities_fast(dsm_lds=pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True), arr_den_s_i=arr_den_s_i, compute_log=True)
+    Ns = N*N
+    return np.dot(np.reshape(a=p_ij-w_cf*(p_ij+q_ij), newshape=Ns), np.reshape(a=log_p_ij-log_q_ij, newshape=Ns))
+
+def nerv_grad(x, p_ij, log_p_ij, w_cf, N, n_components, arr_den_s_i):
+    """
+    Computes the value of the gradient of the objective function of NeRV.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain p_{j|i}, as defined in [6]. Diagonal elements must be equal to 0.
+    - log_p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain log(p_{j|i}), as defined in [6]. Diagonal elements must be equal to 0.
+    - w_cf: scalar between 0 and 1, equal to (1-lambda) in [6].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - arr_den_s_i: one-dimensional numpy array with N elements, in which element i contains sigma_i**2.
+    Out:
+    A one-dimensional numpy array with N*n_components elements, where element i is the coordinate of the gradient associate to x[i].
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the LDS similarities
+    q_ij, log_q_ij = sne_lds_similarities_fast(dsm_lds=pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True), arr_den_s_i=arr_den_s_i, compute_log=True)
+    arr_one = np.ones(shape=N)
+    # Computing intermediate variables
+    q_ij_log_q_ij_log_p_ij = q_ij*(log_q_ij-log_p_ij)
+    c_ij = (((1-w_cf)*(p_ij - q_ij)-w_cf*q_ij_log_q_ij_log_p_ij).T/np.maximum(np.finfo(dtype=np.float64).eps, arr_den_s_i)).T
+    e_ij = (q_ij.T*(w_cf*np.dot(q_ij_log_q_ij_log_p_ij, arr_one)/np.maximum(np.finfo(dtype=np.float64).eps, arr_den_s_i))).T
+    d_ij = c_ij+e_ij
+    # Returning the gradient
+    return 2*np.reshape(a=(X.T*np.dot(arr_one, d_ij)).T - np.dot(d_ij+d_ij.T, X), newshape=N*n_components)
+
+def nerv_implem(X_hds, perp, init, w_cf):
+    """
+    This function applies NeRV to reduce the dimensionality of a data set to 2 dimensions.
+    In:
+    - X_hds: numpy.ndarray with shape (N, M), containing the high dimensional data set, with one row per example and one column per dimension.
+    - perp: perplexity. If perp<=1, an error is raised.
+    - init: see function sne_init_embedding for a description.
+    - w_cf: scalar between 0 and 1. It weights the two KL divergences of the objective function. It is equal to (1-lambda) in [6]. An error is raised if 0<=w_cf<=1 is not respected.
+    Out:
+    A numpy.ndarray with shape (N, 2), containing the low dimensional data set, with one row per example and one column per dimension.
+    Remarks:
+    - L-BFGS algorithm is used, as suggested in [1]. It has been experimentally observed to be more efficient than conjugate gradient (Polak-Ribiere) algorithm, suggested in [6].
+    - As suggested in [6], the HDS distances are scaled such that the average HDS distance is equal to 1.
+    - As suggested in [6], an initialization procedure is performed. We run 10 rounds of L-BFGS (with n_cg_step_rnd steps per round), and after each round decrease the bandwidth sigma_i. Initialially sigma_i is set to half the diameter of the input data. We decrease them linearly so that the final value makes the entropy of the p_{j|i} distribution equal to the perplexity.
+    """
+    global module_name, sim_dr_nitmax, sim_dr_gtol, sim_dr_ftol, sim_dr_maxls, sim_dr_maxcor
+    
+    if (w_cf<0) or (w_cf>1):
+        raise ValueError("Error in function nerv_implem of module {module_name}: w_cf={w_cf} while it should respect 0<=w_cf<=1.".format(module_name=module_name, w_cf=w_cf))
+    
+    # Defining the random state
+    rand_state = np.random.RandomState(0)
+    # Number of data points
+    N = X_hds.shape[0]
+    # Dimension of the LDS
+    n_components = 2
+    # Maximum number of L-BFGS steps with the final bandwidths.
+    nit_max_cg = sim_dr_nitmax
+    # Number of initialization rounds
+    n_rnd_init = 10
+    # Number of L-BFGS steps per initialization round
+    n_cg_step_rnd = nit_max_cg
+    # Tolerance for the norm of the gradient in the L-BFGS algorithm
+    gtol = sim_dr_gtol
+    # Tolerance for the relative update of the value of the objective function.
+    ftol = sim_dr_ftol
+    # Maximum number of line search steps (per L-BFGS iteration).
+    maxls = sim_dr_maxls
+    # The maximum number of variable metric corrections used to define the limited memory matrix. 
+    maxcor = sim_dr_maxcor
+    
+    # Initializing the low dimensional embedding. We reshape as the optimization functions only work with one-dimensional arrays.
+    X_lds = np.reshape(a=sne_init_embedding(X_hds=X_hds, init=init, n_components=n_components, rand_state=rand_state), newshape=N*n_components)
+    
+    # Computing the pairwise distances in the HDS
+    d_hds = pairwise_dist(X=X_hds, metric='euclidean', tomatrix=False)
+    # Scaling the HDS distances so that the average distance is equal to 1, as suggested in [6].
+    d_hds /= np.maximum(np.finfo(dtype=np.float64).eps, d_hds.mean())
+    # Half diameter of the input data
+    half_diam_data = d_hds.max(axis=None)/2.0
+    # Squaring the distances and saving them in matrix form.
+    d_hds = pairwise_dist_tomatrix(d=d_hds**2)
+    
+    # Computing the HDS similarities with the bandwidths fixed to make the entropy of the p_{ij}'s, for each i, equal to the specified perplexity. fin_arr_den_s_i is an array with N elements, where element i is sigma_i**2.
+    fin_p_ij, log_fin_p_ij, fin_arr_den_s_i = sne_hds_similarities(dsm_hds=d_hds, perp=perp, compute_log=True)
+    # Computing the corresponding sigma_i's
+    fin_sigma_i = np.sqrt(fin_arr_den_s_i)
+    
+    # Initialization phase
+    for rnd in range(n_rnd_init):
+        # Computing the bandwiths sigma_i, for i=1, ..., N. They decrease linearly through the initialization rounds.
+        w_rnd = float(rnd)/n_rnd_init
+        arr_den_s_i = ((1-w_rnd)*half_diam_data+w_rnd*fin_sigma_i)**2
+        # Computing the corresponding HDS similarities. We use the SNE LDS similarities computation functionas we impose the bandwidths.
+        p_ij, log_p_ij = sne_lds_similarities_fast(dsm_lds=d_hds, arr_den_s_i=arr_den_s_i, compute_log=True)
+        # Defining the arguments of the L-BFGS algorithm
+        args = (p_ij, log_p_ij, w_cf, N, n_components, arr_den_s_i)
+        # Running L-BFGS
+        res = lbfgsb(fun=nerv_obj_fct, x0=X_lds, args=args, jac=nerv_grad, disp=False, gtol=gtol, ftol=ftol, maxiter=n_cg_step_rnd, maxls=maxls, maxcor=maxcor)
+        X_lds = res.x
+    
+    # Defining the arguments of the final run of the L-BFGS algorithm
+    args = (fin_p_ij, log_fin_p_ij, w_cf, N, n_components, fin_arr_den_s_i)
+    # Running the final L-BFGS steps (with the right bandwidths)
+    res = lbfgsb(fun=nerv_obj_fct, x0=X_lds, args=args, jac=nerv_grad, disp=False, gtol=gtol, ftol=ftol, maxiter=nit_max_cg, maxls=maxls, maxcor=maxcor)
+    X_lds = res.x
+    # Returning the reshaped result
+    return np.reshape(a=X_lds, newshape=(N, n_components))
+
+##############################
+############################## JSE (Jensen-Shannon embedding), from [1]. 
+##############################
+
+def jse_obj_fct(x, p_ij, dot_p_ij_log_p_ij, w_cf, N, n_components):
+    """
+    Computes the value of the objective function of JSE.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain p_{ij}, as defined in [1]. Diagonal elements must be equal to 0.
+    - dot_p_ij_log_p_ij: a scalar equal to np.dot(np.reshape(a=p_ij, newshape=N**2), np.reshape(a=np.log(p_ij), newshape=N**2)).
+    - w_cf: scalar strictly between 0 and 1, equal to kappa in [1].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    Out:
+    A scalar representing the JSE objective function evaluation.
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the LDS similarities
+    q_ij, log_q_ij = sne_lds_similarities_fast(dsm_lds=pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True), arr_den_s_i=2*np.ones(shape=N, dtype=np.float64), compute_log=True)
+    opp_w_cf = 1-w_cf
+    Ns = N*N
+    z_ij = np.reshape(a=w_cf*p_ij + opp_w_cf*q_ij, newshape=Ns)
+    return dot_p_ij_log_p_ij/opp_w_cf + np.dot(np.reshape(a=q_ij, newshape=Ns), np.reshape(a=log_q_ij, newshape=Ns))/w_cf + scipy.special.entr(z_ij).sum()/(w_cf*opp_w_cf)
+
+def jse_grad(x, p_ij, dot_p_ij_log_p_ij, w_cf, N, n_components):
+    """
+    Computes the value of the gradient of the objective function of JSE.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - p_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain p_{ij}, as defined in [1]. Diagonal elements must be equal to 0.
+    - dot_p_ij_log_p_ij: a scalar equal to np.dot(np.reshape(a=p_ij, newshape=N**2), np.reshape(a=np.log(p_ij), newshape=N**2)).
+    - w_cf: scalar strictly between 0 and 1, equal to kappa in [1].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    Out:
+    A one-dimensional numpy array with N*n_components elements, where element i is the coordinate of the gradient associate to x[i].
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the LDS similarities
+    q_ij, log_q_ij = sne_lds_similarities_fast(dsm_lds=pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True), arr_den_s_i=2*np.ones(shape=N, dtype=np.float64), compute_log=True)
+    z_ij = w_cf*p_ij + (1-w_cf)*q_ij
+    arr_one = np.ones(shape=N, dtype=np.float64)
+    # To avoid taking the log of 0's. 
+    z_ij[np.isclose(0, z_ij)] = 1
+    # Computing intermediate variables
+    c_ij = q_ij*(log_q_ij-np.log(z_ij))
+    d_ij = (q_ij.T*np.dot(c_ij, arr_one)).T - c_ij
+    # Returning the gradient
+    return np.reshape(a=(X.T*np.dot(arr_one, d_ij)).T - np.dot(d_ij+d_ij.T, X), newshape=N*n_components)/w_cf
+
+def jse_implem(X_hds, perp, init, w_cf):
+    """
+    This function applies JSE to reduce the dimensionality of a data set to 2 dimensions.
+    In:
+    - X_hds: numpy.ndarray with shape (N, M), containing the high dimensional data set, with one row per example and one column per dimension.
+    - perp: perplexity. If perp<=1, an error is raised.
+    - init: see function sne_init_embedding for a description.
+    - w_cf: scalar strictly between 0 and 1. It weights the two KL divergences of the objective function. It is equal to kappa in [1]. An error is raised if 0<w_cf<1 is not respected.
+    Out:
+    A numpy.ndarray with shape (N, 2), containing the low dimensional data set, with one row per example and one column per dimension.
+    Remarks:
+    - L-BFGS algorithm is used, as suggested in [10].
+    - Multi-scale optimization is performed, as presented in [10].
+    """
+    global module_name, sim_dr_nitmax, sim_dr_gtol, sim_dr_ftol, sim_dr_maxls, sim_dr_maxcor
+    
+    if (w_cf<=0) or (w_cf>=1):
+        raise ValueError("Error in function jse_implem of module {module_name}: w_cf={w_cf} while it should respect 0<w_cf<1.".format(module_name=module_name, w_cf=w_cf))
+    if perp <= 1:
+        raise ValueError("Error in function jse_implem of module {module_name}: perp={perp} while it should respect perp>1.".format(module_name=module_name, perp=perp))
+    
+    # Defining the random state
+    rand_state = np.random.RandomState(0)
+    # Number of data points
+    N = X_hds.shape[0]
+    Ns = N*N
+    # Dimension of the LDS
+    n_components = 2
+    # Maximum number of L-BFGS steps at each stage of the multi-scale optimization.
+    nit_max = sim_dr_nitmax
+    # Tolerance for the norm of the gradient in the L-BFGS algorithm
+    gtol = sim_dr_gtol
+    # Tolerance for the relative update of the value of the objective function.
+    ftol = sim_dr_ftol
+    # Maximum number of line search steps (per L-BFGS iteration).
+    maxls = sim_dr_maxls
+    # The maximum number of variable metric corrections used to define the limited memory matrix. 
+    maxcor = sim_dr_maxcor
+    
+    # Initializing the low dimensional embedding. We reshape as the optimization functions only work with one-dimensional arrays.
+    X_lds = np.reshape(a=sne_init_embedding(X_hds=X_hds, init=init, n_components=n_components, rand_state=rand_state), newshape=N*n_components)
+    
+    # Computing the HDS distances. We use "sqeuclidean" metric instead of "euclidean" to avoid squaring the distances.
+    dsm_hds = pairwise_dist(X=X_hds, metric='sqeuclidean', tomatrix=True)
+    
+    # Variables for the multi-scale optimization
+    K_star = 2
+    cur_perp, go = (2**(round(np.log2(N/K_star))-1))*K_star, True
+    
+    # Multi-scale optimization
+    while go:
+        if cur_perp <= perp:
+            cur_perp, go = perp, False
+        # Defining the arguments of the final run of the L-BFGS algorithms
+        p_ij, log_p_ij = sne_hds_similarities(dsm_hds=dsm_hds, perp=cur_perp, compute_log=True)[:2]
+        dot_p_ij_log_p_ij = np.dot(np.reshape(a=p_ij, newshape=Ns), np.reshape(a=log_p_ij, newshape=Ns))
+        args = (p_ij, dot_p_ij_log_p_ij, w_cf, N, n_components)
+        # Running L-BFGS
+        res = lbfgsb(fun=jse_obj_fct, x0=X_lds, args=args, jac=jse_grad, disp=False, gtol=gtol, ftol=ftol, maxiter=nit_max, maxls=maxls, maxcor=maxcor)
+        X_lds = res.x
+        
+        # Decreasing the perplexity
+        cur_perp = round(cur_perp/2.0)
+    
+    # Returning the reshaped result
+    return np.reshape(a=X_lds, newshape=(N, n_components))
+
+##############################
+############################## Multiscale JSE, from [10]. 
+##############################
+
 @numba.jit(nopython=True)
 def ms_perplexities(N, K_star=2):
     """
@@ -700,6 +954,202 @@ def ms_perplexities(N, K_star=2):
     K_h = (np.float64(2.0)**(np.linspace(L_min-1, L_max-1, L).astype(np.float64)))*np.float64(K_star)
     # Returning
     return L_min, L_max, L, K_h
+
+@numba.jit(nopython=True)
+def msjse_hds_similarities(dsm_hds, arr_perp):
+    """
+    Compute the matrix of multi-scale HDS similarities sigma_{ij}, as defined in [10].
+    In:
+    - dsm_hds: two-dimensional numpy array with shape (N, N), where N is the number of data points. Element [i,j] must be the HDS distance between i and j.
+    - arr_perp: numpy one-dimensional array containing the perplexities. All the perplexities must be > 1.
+    Out:
+    A tuple with two elements:
+    - A two-dimensional numpy array with shape (N, N) and in which element [i,j] = sigma_{ij}.
+    - A two-dimensional numpy array with shape (arr_perp.size, N) and in which element [h,i] = tau_{hi} = 2/pi_{hi}.
+    - sim_hij: three-dimensional numpy array with shape (arr_perp.size, N, N) where sim_hij[h,:,:] contains the HDS similarities at scale arr_perp[h].
+    """
+    # Number of data points
+    N = dsm_hds.shape[0]
+    # Number of perplexities
+    L = arr_perp.size
+    # Matrix storing the multi-scale HDS similarities sigma_{ij}. Element [i,j] contains sigma_{ij}. sigma_{ii} is set to 0.
+    sigma_ij = np.zeros(shape=(N,N), dtype=np.float64)
+    # Matrix storing the HDS similarities sigma_{hij} at each scale.
+    sim_hij = np.empty(shape=(L,N,N), dtype=np.float64)
+    # Matrix storing the HDS tau_{hi}. Element [h,i] contains tau_{hi}.
+    tau_hi = np.empty(shape=(L,N), dtype=np.float64)
+    # For each perplexity
+    for h, perp in enumerate(arr_perp):
+        # Using the bandwidths found at the previous scale to initialize the binary search at the current scale.
+        if h > 0:
+            start_bs = tau_hi[h-1,:]
+        else:
+            start_bs = np.ones(shape=N, dtype=np.float64)
+        # Computing the N**2 HDS similarities sigma_{hij}
+        sim_hij[h,:,:], dum, tau_hi[h,:] = sne_hds_similarities(dsm_hds=dsm_hds, perp=perp, compute_log=False, start_bs=start_bs)
+        # Updating the multi-scale HDS similarities
+        sigma_ij += sim_hij[h,:,:]
+    # Scaling the multi-scale HDS similarities
+    sigma_ij /= np.float64(L)
+    # Returning
+    return sigma_ij, tau_hi, sim_hij
+
+@numba.jit(nopython=True)
+def msjse_lds_bandwidths(tau_hi, K_h, N, n_components, X_lds, fit_U=True):
+    """
+    Computes the multi-scale the LDS bandwidths and precisions used in MsJSE, MsSNE and MsNeRV.
+    In:
+    - tau_hi: a two-dimensional numpy array in which element tau_hi[h,i] contains tau_{hi} = 2/pi_{hi}, as defined in [10]. 
+    - K_h: one-dimensional numpy array, with the perplexities at each scale in increasing order.
+    - N: number of data points.
+    - n_components: numbr of components of the LDS.
+    - X_lds: two-dimensional numpy array with shape (N, n_components) containing the current value of the low-dimensional embedding.
+    - fit_U: boolean. If True, U is computed as defined in [10]. Otherwise, it is fixed to 1 and tau_hi is not used (hence its value does not matter).
+    Out:
+    A tuple with:
+    - D_h: if fit_U is True, a one-dimensional numpy array containing D_{h} at the different scales as defined in [10]. Otherwise, equal to np.empty(shape=tau_hi.shape[0]-1, dtype=np.float64).
+    - U: if fit_U is True, U as defined in [10]. Otherwise, equal to 1.0.
+    - p_h: one-dimensional numpy array with the LDS precisions at each scale defined by K_h.
+    - t_h: one-dimensional numpy array with the LDS bandwidths at each scale defined by K_h.
+    """
+    global n_eps_np_float64
+    N_f = np.float64(N)
+    n_c_f = np.float64(n_components)
+    # Fitting U
+    if fit_U:
+        log_tau_diff = np.log2(tau_hi[1:,:])-np.log2(tau_hi[:-1,:])
+        log_tau_diff_neq0 = np.nonzero(log_tau_diff!=0)[0]
+        log_tau_diff[log_tau_diff_neq0] = 1.0/log_tau_diff[log_tau_diff_neq0]
+        # Computing D_h (for the computation of U)
+        D_h = np.dot(log_tau_diff, np.ones(shape=N, dtype=np.float64))*2.0/N_f
+        # Computing U
+        U = np.float64(min(2, max(1, D_h.max()/n_c_f)))
+    else:
+        D_h = np.empty(shape=K_h.size-1, dtype=np.float64)
+        U = 1.0
+    # Computing the mean variance of the LDS dimensions. We use a loop because of numba.
+    mean_var_X_lds = np.float64(0.0)
+    N_1_f = N_f/np.float64(N-1)
+    for k in range(n_components):
+        mean_var_X_lds += np.var(X_lds[:,k])*N_1_f
+    mean_var_X_lds /= n_c_f
+    # Computing the LDS precisions
+    p_h = K_h**(U*2.0/n_c_f)
+    p_h = ((2.0**(1.0+2.0/n_c_f))*p_h.max()/np.maximum(n_eps_np_float64, p_h*mean_var_X_lds)).astype(np.float64)
+    # Computing the LDS bandwidths.
+    t_h = np.maximum(n_eps_np_float64, 2.0/np.maximum(n_eps_np_float64, p_h))
+    # Returning
+    return D_h, U, p_h, t_h
+
+@numba.jit(nopython=True)
+def msjse_hlds_bandwidths(dsm_hds, K_h, N, n_components, X_lds, fit_U=True):
+    """
+    Computes the multi-scale HDS bandwidths and the LDS bandwidths and precisions used in MsJSE, MsSNE and MsNeRV.
+    In:
+    - dsm_hds: two-dimensional numpy array with the pairwise HDS distances between the data points.
+    - K_h: one-dimensional numpy array, with the perplexities at each scale in increasing order.
+    - N: number of data points.
+    - n_components: numbr of components of the LDS.
+    - X_lds: two-dimensional numpy array with shape (N, n_components) containing the current value of the low-dimensional embedding.
+    - fit_U: same as for msjse_lds_bandwidths.
+    Out:
+    A tuple with:
+    - tau_hi: a two-dimensional numpy array in which element tau_hi[h,i] contains tau_{hi} = 2/pi_{hi}, as defined in [10].
+    - D_h: if fit_U is True, a one-dimensional numpy array containing D_{h} at the different scales as defined in [10]. Otherwise, a dummy one-dimensional numpy array of the same size as when fit_U is True.
+    - U: U as defined in [10] if fit_U is True, or 1 otherwise.
+    - p_h: one-dimensional numpy array with the LDS precisions at each scale defined by K_h.
+    - t_h: one-dimensional numpy array with the LDS bandwidths at each scale defined by K_h.
+    """
+    # Computing the multi-scale HDS similarities. Element sigma_ij[i,j] contains sigma_{ij}. sigma_{ii} is set to 0. Element tau_hi[h,i] contains tau_{hi} = 2/pi_{hi}. 
+    sigma_ij, tau_hi = msjse_hds_similarities(dsm_hds=dsm_hds, arr_perp=K_h)[:2]
+    # Computing the LDS bandwidths and precisions
+    D_h, U, p_h, t_h = msjse_lds_bandwidths(tau_hi=tau_hi, K_h=K_h, N=N, n_components=n_components, X_lds=X_lds, fit_U=fit_U)
+    # Returning
+    return tau_hi, D_h, U, p_h, t_h
+
+def msjse_obj_fct(x, sigma_ij, opp_entr_sigma_ij, w_cf, N, n_components, p_h, t_h, n_perp):
+    """
+    Computes the value of the objective function of Multi-scale JSE.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - sigma_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain sigma_{ij}, as defined in [10]. Diagonal elements must be equal to 0.
+    - opp_entr_sigma_ij: a scalar equal to np.dot(np.reshape(a=sigma_ij, newshape=N**2), np.reshape(a=np.log(sigma_ij), newshape=N**2)).
+    - w_cf: scalar strictly between 0 and 1, equal to kappa in [1].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - n_perp: number of perplexities which are considered.
+    - p_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS precision associated with the h^th considered perplexity.
+    - t_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS bandwidth associated with the h^th considered perplexity, which is equal to 2.0/p_h[h].
+    Out:
+    A scalar representing the Multi-scale JSE objective function evaluation.
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the pairwise squared euclidean distances in the LDS
+    dsm_lds = pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True)
+    # LDS multi-scale similarities. 
+    s_ij = np.zeros(shape=(N,N))
+    arr_ones = np.ones(shape=N)
+    # For each perplexity
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities and updating s_ij
+        s_ij += sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+    # Scaling s_ij
+    s_ij /= n_perp
+    # Computing the cost function value
+    opp_w_cf = 1-w_cf
+    z_ij = w_cf*sigma_ij + opp_w_cf*s_ij
+    return opp_entr_sigma_ij/opp_w_cf - scipy.special.entr(s_ij).sum()/w_cf + scipy.special.entr(z_ij).sum()/(w_cf*opp_w_cf)
+
+def msjse_grad(x, sigma_ij, opp_entr_sigma_ij, w_cf, N, n_components, p_h, t_h, n_perp):
+    """
+    Computes the value of the gradient of the objective function of Multi-scale JSE.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - sigma_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain sigma_{ij}, as defined in [10]. Diagonal elements must be equal to 0.
+    - opp_entr_sigma_ij: a scalar equal to np.dot(np.reshape(a=sigma_ij, newshape=N**2), np.reshape(a=np.log(sigma_ij), newshape=N**2)).
+    - w_cf: scalar strictly between 0 and 1, equal to kappa in [1].
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - n_perp: number of perplexities which are considered.
+    - p_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS precision associated with the h^th considered perplexity.
+    - t_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS bandwidth associated with the h^th considered perplexity, which is equal to 2.0/p_h[h].
+    Out:
+    A one-dimensional numpy array with N*n_components elements, where element i is the coordinate of the gradient associate to x[i].
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the pairwise squared euclidean distances in the LDS
+    dsm_lds = pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True)
+    # Intermediate variable. 
+    s_ij = np.zeros(shape=(N,N))
+    arr_ones = np.ones(shape=N)
+    
+    # For each perplexity
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities
+        s_hij = sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+        # Updating s_ij
+        s_ij += s_hij
+
+    # Scaling s_ij
+    s_ij /= n_perp
+    # Computing z_ij
+    z_ij = w_cf*sigma_ij + (1-w_cf)*s_ij
+    
+    # Computing the gradient
+    grad = np.zeros(shape=(N, n_components))
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities
+        s_hij = sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+        # Intermediate variable. 
+        shij_log_zij_sij = scipy.special.rel_entr(s_hij, s_ij) - scipy.special.rel_entr(s_hij, z_ij)
+        Mh = shij_log_zij_sij - (s_hij.T*np.dot(shij_log_zij_sij, arr_ones)).T
+        Mh += Mh.T
+        # Updating the gradient
+        grad += p_h[h]*((X.T*np.dot(Mh, arr_ones)).T - np.dot(Mh, X))
+    # Reshaping the gradient
+    grad = np.reshape(a=grad, newshape=N*n_components)/(w_cf*n_perp)
+    # Returning the gradient
+    return grad
 
 
 ##############################
@@ -729,6 +1179,62 @@ def mssne_lds_similarities_h_fast(arr_den_s_i, np_eps, arr_ones, dsm_lds_min_row
     # Computing the N**2 LDS similarities q_{ij}, for i, j = 0, ..., N-1, and returning.
     return (q_ij/np.maximum(np_eps, np.dot(arr_ones.astype(np.float64), q_ij))).T
 
+@numba.jit(nopython=True)
+def mssne_eval_sim_lds(N, n_perp, t_h, np_eps, arr_ones, dsm_lds_min_row_dsm_lds_t):
+    """
+    Evaluates the LDS similarities.
+    In: 
+    - N: number of data points.
+    - n_perp: number of perplexities which are considered.
+    - t_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS bandwidth associated with the h^th considered perplexity, which is equal to 2.0/p_h[h]. It is assumed that t_h == np.maximum(np_eps, t_h).
+    - np_eps, arr_ones, dsm_lds_min_row_dsm_lds_t: as in function mssne_lds_similarities_h_fast.
+    Out:
+    A tuple with:
+    - A two-dimensional numpy array with shape (N, N) containing the pairwise multi-scale LDS similarities. The diagonal elements are forced to 1.0.
+    - A three-dimensional numpy array s_hij with shape (n_perp, N, N). For each h in range(n_perp), s_hij[h,:,:] contains the pairwise LDS similarities at scale h.
+    """
+    # LDS single-scale similarities.
+    s_hij = np.empty(shape=(n_perp,N,N), dtype=np.float64)
+    # LDS multi-scale similarities. 
+    s_ij = np.zeros(shape=(N,N), dtype=np.float64)
+    # For each scale
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities and updating s_ij
+        s_hij[h,:,:] = mssne_lds_similarities_h_fast(arr_den_s_i=t_h[h]*arr_ones, np_eps=np_eps, arr_ones=arr_ones, dsm_lds_min_row_dsm_lds_t=dsm_lds_min_row_dsm_lds_t)
+        s_ij += s_hij[h,:,:]
+    # Scaling s_ij
+    s_ij /= np.float64(n_perp)
+    # As s_ij is only used at the denominator, we fill its diagonal with ones, to avoid dividing by zero. This does not change the results, as the diagonal of sigma_ij is equal to 0.
+    s_ij = fill_diago(M=s_ij, v=1.0)
+    # Setting the remaining 0 elements of s_ij to the smallest non-zero value, to avoid dividing by zero.
+    s_ij = np.maximum(np_eps, s_ij)
+    # Returning
+    return s_ij, s_hij
+
+def mssne_eval_dsm_lds_min_row_dsm_lds_t_dsm(dsm_lds):
+    """
+    Evaluates the dsm_lds_min_row_dsm_lds_t parameter of function mssne_lds_similarities_h_fast. N denotes the number of samples.
+    In: 
+    - dsm_lds: numpy two-dimensional array with shape (N, N), containing the pairwise LDS squared distances.
+    Out: 
+    dsm_lds_min_row_dsm_lds_t as described in mssne_lds_similarities_h_fast.
+    """
+    np.fill_diagonal(a=dsm_lds, val=np.inf)
+    # Returning
+    return dsm_lds.min(axis=1)-dsm_lds.T
+
+def mssne_eval_dsm_lds_min_row_dsm_lds_t(X):
+    """
+    Evaluates the dsm_lds_min_row_dsm_lds_t parameter of function mssne_lds_similarities_h_fast.
+    In: 
+    - X: numpy two-dimensional array with shape (N, n_components), containing the current values of the low dimensional coordinates. It contains one example per row and one LDS coordinate per column.
+    Out: 
+    dsm_lds_min_row_dsm_lds_t as described in mssne_lds_similarities_h_fast.
+    """
+    # Computing the pairwise squared euclidean distances in the LDS
+    dsm_lds = pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True)
+    # Returning
+    return mssne_eval_dsm_lds_min_row_dsm_lds_t_dsm(dsm_lds=dsm_lds)
 
 def mssne_obj_fct(x, sigma_ij, N, n_components, p_h, t_h, n_perp):
     """
@@ -954,50 +1460,90 @@ def mssne_implem(X_hds, init, n_components=2, ret_sim_hds=False, fit_U=True, dm_
     else:
         return X_lds
 
-
 ##############################
-############################## Basic tests. 
+############################## Multiscale NeRV, from [10]. 
 ##############################
 
+def msnerv_obj_fct(x, sigma_ij, N, n_components, p_h, t_h, n_perp, w_cf):
+    """
+    Computes the value of the objective function of Multi-scale NeRV.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - sigma_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain sigma_{ij}, as defined in [10]. Diagonal elements must be equal to 0.
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - n_perp: number of perplexities which are considered.
+    - p_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS precision associated with the h^th considered perplexity.
+    - t_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS bandwidth associated with the h^th considered perplexity, which is equal to 2.0/p_h[h].
+    - w_cf: see the apply function for a description.
+    Out:
+    A scalar representing the Multi-scale NeRV objective function evaluation.
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the pairwise squared euclidean distances in the LDS
+    dsm_lds = pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True)
+    # LDS multi-scale similarities. np.zeros(shape=(N,N,N)) is too big to be stored.
+    s_ij = np.zeros(shape=(N,N))
+    arr_ones = np.ones(shape=N)
+    # For each perplexity
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities and updating s_ij
+        s_ij += sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+    # Scaling s_ij
+    s_ij /= n_perp
+    # Computing the cost function value
+    return (1-w_cf)*scipy.special.rel_entr(sigma_ij, np.maximum(np.finfo(dtype=np.float64).eps, s_ij)).sum() + w_cf*scipy.special.rel_entr(s_ij, np.maximum(np.finfo(dtype=np.float64).eps, sigma_ij)).sum()
 
-def plot_leo(X_lds, labels, tit, labs=0, classes_names=0):
+def msnerv_grad(x, sigma_ij, N, n_components, p_h, t_h, n_perp, w_cf):
+    """
+    Computes the value of the gradient of the objective function of Multi-scale NeRV.
+    In:
+    - x: numpy one-dimensional array with N*n_components elements, containing the current values of the low dimensional coordinates. np.reshape(a=x, newshape=(N, n_components)) should yield a two-dimensional array with one example per row and one LDS coordinate per column.
+    - sigma_ij: numpy two-dimensional array with shape (N,N). Element (i,j) should contain sigma_{ij}, as defined in [10]. Diagonal elements must be equal to 0.
+    - N: number of data points.
+    - n_components: dimension of the LDS.
+    - n_perp: number of perplexities which are considered.
+    - p_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS precision associated with the h^th considered perplexity.
+    - t_h: one-dimensional numpy array containing n_perp elements and in which element h contains the LDS bandwidth associated with the h^th considered perplexity, which is equal to 2.0/p_h[h].
+    - w_cf: see the apply function for a description.
+    Out:
+    A one-dimensional numpy array with N*n_components elements, where element i is the coordinate of the gradient associate to x[i].
+    """
+    X = np.reshape(a=x, newshape=(N, n_components))
+    # Computing the pairwise squared euclidean distances in the LDS
+    dsm_lds = pairwise_dist(X=X, metric='sqeuclidean', tomatrix=True)
+    # Intermediate variable. np.zeros(shape=(N,N,N)) is too big to be stored.
+    s_ij = np.zeros(shape=(N,N))
+    arr_ones = np.ones(shape=N)
+    # For each perplexity
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities and updating s_ij
+        s_ij += sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+    # Scaling s_ij
+    s_ij /= n_perp
     
-    N= len(set(labels))			
-    cmap = plt.cm.jet
-    # extract all colors from the .jet map
-    cmaplist = [cmap(i) for i in range(cmap.N)]
-    # create the new map
-    cmap = cmap.from_list('Custom cmap', cmaplist, cmap.N)
-    bounds = np.linspace(0,N,N+1)
-    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
-		
-    a1 = plt.scatter(X_lds[:, 0], X_lds[:, 1],  c=labels, cmap=cmap, s=20, norm=norm)
+    # Computing the quotient of sigma_ij by s_ij, accounting for the zero's in s_ij.
+    sigma_s_ij = sigma_ij/np.maximum(np.finfo(dtype=np.float64).eps, s_ij)
+    # Computing the log of the quotient of s_ij by sigma_ij, using masked array to take the zero's of s_ij and sigma_ij into account. When s_ij is equal to zero, the log is set to 0.
+    log_s_sigma_ij = np.ma.log(s_ij/np.maximum(np.finfo(dtype=np.float64).eps, sigma_ij)).filled(0)
+    # Computing a matrix of intermediate factors
+    int_terms = (w_cf-1)*sigma_s_ij+w_cf*(1+log_s_sigma_ij)
     
-    if labs==1:    
-       for i in range(X_lds.shape[0]):              
-           plt.text(X_lds[i, 0], X_lds[i, 1], str(i), fontdict={'size': 7})
-
-    plt.xlim([2*X_lds.min(),2*X_lds.max()])
-    plt.ylim([2*X_lds.min(),2*X_lds.max()])
-    plt.title(tit)
-
-    lp = lambda i: plt.plot([],color=a1.cmap(a1.norm(i)), ms=10.0, mec="none", ls="", marker="o")[0]                
-    handles = [lp(i) for i in list(set(labels))]
-    plt.legend(labels=classes_names, loc=2)
-
-    plt.show()	
-
-
-###
-### Multi-scale SNE (convenient as no perplexity is needed => valid for all data set sizes). If you provide X_hds, then Euclidean distance are used in the HD space. If you want to use another HD distance, provide in dm_hds a two-dimensional numpy array with the pairwise HD distances and set init and X_hds to None. 
-###
-
-
-init = 'random'
-print("Applying Ms SNE")
-
-#X_lds = mssne_implem(X_hds=X_hds, init=init, n_components=2, dm_hds=None); print("Without similarity matrix");
-###X_lds = mssne_implem(X_hds=None, init=init, n_components=2, dm_hds=X_hds); print("With similarity matrix");
-
-#plot_leo(X_lds, y, 'Multi-scale SNE: auc={v}'.format(v=1), labs=0,classes_names=classes_names)
-
+    # Computing the gradient
+    grad = np.zeros(shape=(N, n_components))
+    for h in range(n_perp):
+        # Computing the corresponding LDS similarities
+        s_hij = sne_lds_similarities_fast(dsm_lds=dsm_lds, arr_den_s_i=t_h[h]*arr_ones, compute_log=False)[0]
+        # Computing the product between s_hij and the intermediate terms
+        prod_s_hij_int_terms = int_terms*s_hij
+        # Computing the sum of -prod_s_hij_int_terms and s_hij where row i is multiplied by the sum of the i^th row of prod_s_hij_int_terms
+        Mh = (s_hij.T * np.dot(prod_s_hij_int_terms, arr_ones)).T - prod_s_hij_int_terms
+        # Symmetrizing
+        Mh += Mh.T
+        # Updating the gradient
+        grad += p_h[h]*((X.T*np.dot(Mh, arr_ones)).T - np.dot(Mh, X))
+    
+    # Reshaping the gradient
+    grad = np.reshape(a=grad, newshape=N*n_components)/n_perp
+    # Returning the gradient
+    return grad
