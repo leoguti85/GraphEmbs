@@ -19,7 +19,9 @@ python run_synthetic_graphs.py -f ER -opc 0
 ```
 ![emb](https://github.com/leoguti85/GraphEmbs/blob/master/images/ER.png)
 
-Clustering graph embeddings for Erdős–Rényi networks, evaluationg its performance with the normalized mutual information metric:
+*You can plot the graph embeddings faster with t-SNE by uncommenting data.visualize_tsne()*
+
+Clustering graph embeddings for Erdős–Rényi networks in the **embedding space**, evaluationg its performance with the normalized mutual information metric:
 
 ```
 python run_synthetic_graphs.py -f ER -opc 1
