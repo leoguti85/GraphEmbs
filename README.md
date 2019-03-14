@@ -19,7 +19,7 @@ python run_synthetic_graphs.py -f ER -opc 0
 ```
 ![emb](https://github.com/leoguti85/GraphEmbs/blob/master/images/ER.png)
 
-*You can plot the graph embeddings faster with t-SNE by uncommenting data.visualize_tsne()*
+*You can plot the graph embeddings faster with t-SNE by uncommenting the line data.visualize_tsne()*
 
 Clustering graph embeddings for Erdős–Rényi networks in the **embedding space**, evaluationg its performance with the normalized mutual information metric:
 
@@ -40,6 +40,7 @@ This is a multiplex network composed by many airlines operating in Europe. The d
 ## References
 
 [1] Pascal Vincent, Hugo Larochelle, Isabelle Lajoie, Yoshua Bengio, and Pierre-Antoine Manzagol. 2010. Stacked Denoising Autoencoders: Learning Useful Representations in a Deep Network with a Local Denoising Criterion. J. Mach. Learn. Res. 11 (December 2010), 3371-3408.
+
 [2] John A. Lee, Diego H. Peluffo-Ordóñez, Michel Verleysen, Multi-scale similarities in stochastic neighbour embedding: Reducing dimensionality while preserving both local and global structure,Neurocomputing, Volume 169, 2015,
 Pages 246-261.
 
