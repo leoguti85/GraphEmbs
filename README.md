@@ -22,7 +22,7 @@ python run_synthetic_graphs.py -f ER -opc 0
 
 *You can plot the graph embeddings faster with t-SNE by uncommenting the line data.visualize_tsne()*
 
-Clustering graph embeddings for Erdős–Rényi networks in the **embedding space**, evaluationg its performance with the normalized mutual information metric:
+Clustering graph embeddings for Erdős–Rényi networks in the **embedding space**, as well as the evaluation of its performance with the normalized mutual information metric:
 
 ```
 python run_synthetic_graphs.py -f ER -opc 1
@@ -33,6 +33,7 @@ Clustering graph embeddings...
 1.0 +/- 0.0
 ```
 ## Real life datasets
+Here you can find the real life networks we used to perform the experiments that we shown in our paper:
 + **Primary school temporal network data:**
 This data set contains the temporal network of contacts between the children and teachers used in the study published in BMC Infectious Diseases 2014, 14:695. [data](http://www.sociopatterns.org/datasets/primary-school-temporal-network-data/)
 + **Air Transportation Multiplex:** 
