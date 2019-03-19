@@ -5,7 +5,7 @@
 
 In this work we provide an unsupervised approach to learn embedding representations for a collection of graphs so that it can be used in numerous graph mining tasks. By using an unsupervised neural network approach [1] on input graphs, we aim to capture the underlying distribution of the data in order to discriminate between different class of networks. Our method is assessed empirically on synthetic and real life datasets and evaluated in three different tasks: graph clustering, visualization and classification. 
 
-The original paper can be found [here](https://arxiv.org/abs/1903.05980 "preprint paper")
+The original paper can be found [here](https://arxiv.org/abs/1903.05980v1 "preprint paper")
 
 This code was tested on Debian GNU/Linux 8.11 (jessie), python 3.5.2
 
