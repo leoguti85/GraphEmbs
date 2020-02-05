@@ -1,11 +1,11 @@
 # GraphEmbs
 ## Unsupervised Network Embeddings With Node Identity Awareness
-### (Preprint: Unsupervised Network Embeddings for Graph Visualization, Clustering and Classification)
+### (Preprint title: Unsupervised Network Embeddings for Graph Visualization, Clustering and Classification)
 
 
 In this work we provide an unsupervised approach to learn embedding representations for a collection of graphs defined on the same set of nodes, so that it can be used in numerous graph mining tasks. By using an unsupervised neural network approach [1] on input graphs, we aim to capture the underlying distribution of the data in order to discriminate between different class of networks. Our method is assessed empirically on synthetic and real life datasets and evaluated in three different tasks: graph clustering, visualization and classification. 
 
-The original paper can be found [here](https://appliednetsci.springeropen.com/articles/10.1007/s41109-019-0197-1 " journal paper")
+The jornal paper can be found [here](https://appliednetsci.springeropen.com/articles/10.1007/s41109-019-0197-1 " journal paper")
 
 This code was tested on Debian GNU/Linux 8.11 (jessie), python 3.5.2
 
